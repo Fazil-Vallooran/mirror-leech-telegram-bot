@@ -358,7 +358,7 @@ class TelegramUploader:
                     return
                 if thumb == "none":
                     thumb = None
-                self._sent_msg = await self._sent_msg.reply_document(
+                self._sent_msg = await self._sent_msg.send_document(
                     document=self._up_path,
                     quote=True,
                     thumb=thumb,
@@ -388,7 +388,7 @@ class TelegramUploader:
                     return
                 if thumb == "none":
                     thumb = None
-                self._sent_msg = await self._sent_msg.reply_video(
+                self._sent_msg = await self._sent_msg.send_video(
                     video=self._up_path,
                     quote=True,
                     caption=cap_mono,
@@ -407,7 +407,7 @@ class TelegramUploader:
                     return
                 if thumb == "none":
                     thumb = None
-                self._sent_msg = await self._sent_msg.reply_audio(
+                self._sent_msg = await self._sent_msg.send_audio(
                     audio=self._up_path,
                     quote=True,
                     caption=cap_mono,
@@ -422,7 +422,7 @@ class TelegramUploader:
                 key = "photos"
                 if self._listener.is_cancelled:
                     return
-                self._sent_msg = await self._sent_msg.reply_photo(
+                self._sent_msg = await self._sent_msg.send_photo(
                     photo=self._up_path,
                     quote=True,
                     caption=cap_mono,
