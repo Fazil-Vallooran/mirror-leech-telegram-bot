@@ -24,7 +24,6 @@ from tenacity import (
     retry_if_exception_type,
     RetryError,
 )
-
 from ...core.config_manager import Config
 from ...core.mltb_client import TgClient
 from ..ext_utils.bot_utils import sync_to_async
@@ -324,6 +323,20 @@ class TelegramUploader:
         retry=retry_if_exception_type(Exception),
     )
     async def _upload_file(self, cap_mono, file, o_path, force_document=False):
+        """
+        Upload file to dump channel first, then forward to user's PM.
+
+        This approach solves the BOT_METHOD_INVALID error by:
+        1. Uploading once to dump channel (using user session for permissions)
+        2. Copying/forwarding the message to user's PM (no re-upload)
+        3. Avoiding duplicate uploads and contact resolution issues
+
+        Args:
+            cap_mono: Caption with monospace formatting
+            file: Filename
+            o_path: Original file path
+            force_document: Force sending as document
+        """
         if (
             self._thumb is not None
             and not await aiopath.exists(self._thumb)
@@ -332,9 +345,49 @@ class TelegramUploader:
             self._thumb = None
         thumb = self._thumb
         self._is_corrupted = False
+
+        # Get dump channel from config and validate it's an integer
+        dump_channel = None
+        if hasattr(Config, "LEECH_DUMP_CHAT") and Config.LEECH_DUMP_CHAT:
+            try:
+                # Ensure dump_channel is an integer chat ID
+                dump_channel = int(Config.LEECH_DUMP_CHAT)
+                LOGGER.info(f"Dump channel ID: {dump_channel}")
+            except (ValueError, TypeError) as e:
+                LOGGER.error(
+                    f"Invalid LEECH_DUMP_CHAT format: {Config.LEECH_DUMP_CHAT}, error: {e}"
+                )
+                dump_channel = None
+
+        # Determine which client to use for dump channel
+        # Priority: User session > Bot client
+        dump_client = None
+        if dump_channel:
+            if TgClient.user:
+                dump_client = TgClient.user
+                LOGGER.info("Using user session for dump channel")
+            else:
+                dump_client = self._listener.client
+                LOGGER.info(
+                    "Using bot client for dump channel (user session not available)"
+                )
+
+        # Use appropriate client for user PM
+        client = (
+            TgClient.user if self._listener.user_transmission else self._listener.client
+        )
+
+        # User's Telegram ID for forwarding - ensure it's an integer
+        try:
+            user_id = int(self._listener.user_id)
+        except (ValueError, TypeError):
+            LOGGER.error(f"Invalid user_id format: {self._listener.user_id}")
+            user_id = self._listener.message.from_user.id
+
         try:
             is_video, is_audio, is_image = await get_document_type(self._up_path)
 
+            # Generate thumbnail if needed
             if not is_image and thumb is None:
                 file_name = ospath.splitext(file)[0]
                 thumb_path = f"{self._path}/yt-dlp-thumb/{file_name}.jpg"
@@ -342,6 +395,14 @@ class TelegramUploader:
                     thumb = thumb_path
                 elif is_audio and not is_video:
                     thumb = await get_audio_thumbnail(self._up_path)
+
+            # Prepare caption for dump channel (includes user info)
+            # Safely get tag, default to "Unknown" if not available
+            user_tag = getattr(self._listener, "tag", "Unknown")
+            dump_caption = f"👤 User ID: {user_id}\n📝 Tag: {user_tag}\n\n{cap_mono}"
+
+            # STEP 1: Upload to dump channel first
+            dump_msg = None
 
             if (
                 self._listener.as_doc
@@ -351,22 +412,54 @@ class TelegramUploader:
                 key = "documents"
                 if is_video and thumb is None:
                     thumb = await get_video_thumbnail(self._up_path, None)
-
                 if self._listener.is_cancelled:
                     return
                 if thumb == "none":
                     thumb = None
-                client = TgClient.user if self._user_session else self._listener.client
-                sent = await client.send_document(
-                    chat_id=self._sent_msg.chat.id,
-                    document=self._up_path,
-                    thumb=thumb,
-                    caption=cap_mono,
-                    force_document=True,
-                    disable_notification=True,
-                    progress=self._upload_progress,
-                )
-                self._sent_msg = sent
+
+                # Upload to dump channel
+                if dump_channel:
+                    try:
+                        dump_msg = await dump_client.send_document(
+                            chat_id=dump_channel,
+                            document=self._up_path,
+                            thumb=thumb,
+                            caption=dump_caption,
+                            force_document=True,
+                            disable_notification=True,
+                            progress=self._upload_progress,
+                        )
+                        LOGGER.info(
+                            f"Document uploaded to dump channel: {dump_channel}"
+                        )
+                    except Exception as e:
+                        LOGGER.error(f"Failed to upload to dump channel: {e}")
+                        dump_msg = None
+
+                # STEP 2: Forward/copy to user's PM
+                if dump_msg:
+                    # Copy message to user (without quote/reply chain)
+                    self._sent_msg = await client.copy_message(
+                        chat_id=user_id,
+                        from_chat_id=dump_channel,
+                        message_id=dump_msg.id,
+                        caption=cap_mono,  # Use clean caption without user info
+                        disable_notification=True,
+                    )
+                    LOGGER.info(f"Document forwarded to user PM: {user_id}")
+                else:
+                    # Fallback: upload directly to user if dump failed
+                    self._sent_msg = await client.send_document(
+                        chat_id=user_id,
+                        document=self._up_path,
+                        thumb=thumb,
+                        caption=cap_mono,
+                        force_document=True,
+                        disable_notification=True,
+                        progress=self._upload_progress,
+                    )
+                    LOGGER.warning("Uploaded directly to user (dump channel failed)")
+
             elif is_video:
                 key = "videos"
                 duration = (await get_media_info(self._up_path))[0]
@@ -388,20 +481,54 @@ class TelegramUploader:
                     return
                 if thumb == "none":
                     thumb = None
-                client = TgClient.user if self._user_session else self._listener.client
-                sent = await client.send_video(
-                    chat_id=self._sent_msg.chat.id,
-                    video=self._up_path,
-                    caption=cap_mono,
-                    duration=duration,
-                    width=width,
-                    height=height,
-                    thumb=thumb,
-                    supports_streaming=True,
-                    disable_notification=True,
-                    progress=self._upload_progress,
-                )
-                self._sent_msg = sent
+
+                # Upload to dump channel
+                if dump_channel:
+                    try:
+                        dump_msg = await client.send_video(
+                            chat_id=dump_channel,
+                            video=self._up_path,
+                            caption=dump_caption,
+                            duration=duration,
+                            width=width,
+                            height=height,
+                            thumb=thumb,
+                            supports_streaming=True,
+                            disable_notification=True,
+                            progress=self._upload_progress,
+                        )
+                        LOGGER.info(f"Video uploaded to dump channel: {dump_channel}")
+                    except Exception as e:
+                        LOGGER.error(f"Failed to upload video to dump channel: {e}")
+                        dump_msg = None
+
+                # Forward/copy to user's PM
+                if dump_msg:
+                    self._sent_msg = await client.copy_message(
+                        chat_id=user_id,
+                        from_chat_id=dump_channel,
+                        message_id=dump_msg.id,
+                        caption=cap_mono,
+                        disable_notification=True,
+                    )
+                    LOGGER.info(f"Video forwarded to user PM: {user_id}")
+                else:
+                    self._sent_msg = await client.send_video(
+                        chat_id=user_id,
+                        video=self._up_path,
+                        caption=cap_mono,
+                        duration=duration,
+                        width=width,
+                        height=height,
+                        thumb=thumb,
+                        supports_streaming=True,
+                        disable_notification=True,
+                        progress=self._upload_progress,
+                    )
+                    LOGGER.warning(
+                        "Uploaded video directly to user (dump channel failed)"
+                    )
+
             elif is_audio:
                 key = "audios"
                 duration, artist, title = await get_media_info(self._up_path)
@@ -409,32 +536,95 @@ class TelegramUploader:
                     return
                 if thumb == "none":
                     thumb = None
-                client = TgClient.user if self._user_session else self._listener.client
-                sent = await client.send_audio(
-                    chat_id=self._sent_msg.chat.id,
-                    audio=self._up_path,
-                    caption=cap_mono,
-                    duration=duration,
-                    performer=artist,
-                    title=title,
-                    thumb=thumb,
-                    disable_notification=True,
-                    progress=self._upload_progress,
-                )
-                self._sent_msg = sent
+
+                # Upload to dump channel
+                if dump_channel:
+                    try:
+                        dump_msg = await client.send_audio(
+                            chat_id=dump_channel,
+                            audio=self._up_path,
+                            caption=dump_caption,
+                            duration=duration,
+                            performer=artist,
+                            title=title,
+                            thumb=thumb,
+                            disable_notification=True,
+                            progress=self._upload_progress,
+                        )
+                        LOGGER.info(f"Audio uploaded to dump channel: {dump_channel}")
+                    except Exception as e:
+                        LOGGER.error(f"Failed to upload audio to dump channel: {e}")
+                        dump_msg = None
+
+                # Forward/copy to user's PM
+                if dump_msg:
+                    self._sent_msg = await client.copy_message(
+                        chat_id=user_id,
+                        from_chat_id=dump_channel,
+                        message_id=dump_msg.id,
+                        caption=cap_mono,
+                        disable_notification=True,
+                    )
+                    LOGGER.info(f"Audio forwarded to user PM: {user_id}")
+                else:
+                    self._sent_msg = await client.send_audio(
+                        chat_id=user_id,
+                        audio=self._up_path,
+                        caption=cap_mono,
+                        duration=duration,
+                        performer=artist,
+                        title=title,
+                        thumb=thumb,
+                        disable_notification=True,
+                        progress=self._upload_progress,
+                    )
+                    LOGGER.warning(
+                        "Uploaded audio directly to user (dump channel failed)"
+                    )
+
             else:
                 key = "photos"
                 if self._listener.is_cancelled:
                     return
-                client = TgClient.user if self._user_session else self._listener.client
-                sent = await client.send_photo(
-                    chat_id=self._sent_msg.chat.id,
-                    photo=self._up_path,
-                    caption=cap_mono,
-                    disable_notification=True,
-                    progress=self._upload_progress,
-                )
-                self._sent_msg = sent
+
+                # Upload to dump channel
+                if dump_channel:
+                    try:
+                        dump_msg = await client.send_photo(
+                            chat_id=dump_channel,
+                            photo=self._up_path,
+                            caption=dump_caption,
+                            disable_notification=True,
+                            progress=self._upload_progress,
+                        )
+                        LOGGER.info(f"Photo uploaded to dump channel: {dump_channel}")
+                    except Exception as e:
+                        LOGGER.error(f"Failed to upload photo to dump channel: {e}")
+                        dump_msg = None
+
+                # Forward/copy to user's PM
+                if dump_msg:
+                    self._sent_msg = await client.copy_message(
+                        chat_id=user_id,
+                        from_chat_id=dump_channel,
+                        message_id=dump_msg.id,
+                        caption=cap_mono,
+                        disable_notification=True,
+                    )
+                    LOGGER.info(f"Photo forwarded to user PM: {user_id}")
+                else:
+                    self._sent_msg = await client.send_photo(
+                        chat_id=user_id,
+                        photo=self._up_path,
+                        caption=cap_mono,
+                        disable_notification=True,
+                        progress=self._upload_progress,
+                    )
+                    LOGGER.warning(
+                        "Uploaded photo directly to user (dump channel failed)"
+                    )
+
+            # Handle media groups
             if (
                 not self._listener.is_cancelled
                 and self._media_group
@@ -457,12 +647,14 @@ class TelegramUploader:
                     else:
                         self._last_msg_in_group = True
 
+            # Clean up thumbnail
             if (
                 self._thumb is None
                 and thumb is not None
                 and await aiopath.exists(thumb)
             ):
                 await remove(thumb)
+
         except (FloodWait, FloodPremiumWait) as f:
             LOGGER.warning(str(f))
             await sleep(f.value * 1.3)

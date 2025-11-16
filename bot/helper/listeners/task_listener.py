@@ -2,6 +2,7 @@ from aiofiles.os import path as aiopath, listdir, remove
 from asyncio import sleep, gather
 from html import escape
 from requests import utils as rutils
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from ... import (
     intervals,
@@ -322,6 +323,16 @@ class TaskListener(TaskConfig):
             if mime_type != 0:
                 msg += f"\n<b>Corrupted Files: </b>{mime_type}"
             msg += f"\n<b>cc: </b>{self.tag}\n\n"
+            bot_username = "yuoutbot"
+            button = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "📥 Get Files in PM", url=f"https://t.me/{bot_username}"
+                        )
+                    ]
+                ]
+            )
             if not files:
                 await send_message(self.message, msg)
             else:
@@ -329,11 +340,11 @@ class TaskListener(TaskConfig):
                 for index, (link, name) in enumerate(files.items(), start=1):
                     fmsg += f"{index}. <a href='{link}'>{name}</a>\n"
                     if len(fmsg.encode() + msg.encode()) > 4000:
-                        await send_message(self.message, msg + fmsg)
+                        await send_message(self.message, msg + fmsg, button)
                         await sleep(1)
                         fmsg = ""
                 if fmsg != "":
-                    await send_message(self.message, msg + fmsg)
+                    await send_message(self.message, msg + fmsg, button)
         else:
             msg += f"\n\n<b>Type: </b>{mime_type}"
             if mime_type == "Folder":
