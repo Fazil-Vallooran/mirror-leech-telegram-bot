@@ -356,7 +356,9 @@ class TelegramUploader:
                     return
                 if thumb == "none":
                     thumb = None
-                self._sent_msg = await self._sent_msg.send_document(
+                client = TgClient.user if self._user_session else self._listener.client
+                sent = await client.send_document(
+                    chat_id=self._sent_msg.chat.id,
                     document=self._up_path,
                     thumb=thumb,
                     caption=cap_mono,
@@ -364,6 +366,7 @@ class TelegramUploader:
                     disable_notification=True,
                     progress=self._upload_progress,
                 )
+                self._sent_msg = sent
             elif is_video:
                 key = "videos"
                 duration = (await get_media_info(self._up_path))[0]
@@ -385,7 +388,9 @@ class TelegramUploader:
                     return
                 if thumb == "none":
                     thumb = None
-                self._sent_msg = await self._sent_msg.send_video(
+                client = TgClient.user if self._user_session else self._listener.client
+                sent = await client.send_video(
+                    chat_id=self._sent_msg.chat.id,
                     video=self._up_path,
                     caption=cap_mono,
                     duration=duration,
@@ -396,6 +401,7 @@ class TelegramUploader:
                     disable_notification=True,
                     progress=self._upload_progress,
                 )
+                self._sent_msg = sent
             elif is_audio:
                 key = "audios"
                 duration, artist, title = await get_media_info(self._up_path)
@@ -403,7 +409,9 @@ class TelegramUploader:
                     return
                 if thumb == "none":
                     thumb = None
-                self._sent_msg = await self._sent_msg.send_audio(
+                client = TgClient.user if self._user_session else self._listener.client
+                sent = await client.send_audio(
+                    chat_id=self._sent_msg.chat.id,
                     audio=self._up_path,
                     caption=cap_mono,
                     duration=duration,
@@ -413,17 +421,20 @@ class TelegramUploader:
                     disable_notification=True,
                     progress=self._upload_progress,
                 )
+                self._sent_msg = sent
             else:
                 key = "photos"
                 if self._listener.is_cancelled:
                     return
-                self._sent_msg = await self._sent_msg.send_photo(
+                client = TgClient.user if self._user_session else self._listener.client
+                sent = await client.send_photo(
+                    chat_id=self._sent_msg.chat.id,
                     photo=self._up_path,
                     caption=cap_mono,
                     disable_notification=True,
                     progress=self._upload_progress,
                 )
-
+                self._sent_msg = sent
             if (
                 not self._listener.is_cancelled
                 and self._media_group
