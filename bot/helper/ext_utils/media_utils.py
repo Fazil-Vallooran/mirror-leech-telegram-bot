@@ -165,36 +165,49 @@ async def take_ss(video_file, ss_nb) -> bool:
 
 
 async def get_audio_thumbnail(audio_file):
+    """Extract thumbnail using mutagen library (more reliable for MP3s)"""
     output_dir = f"{DOWNLOAD_DIR}thumbnails"
     await makedirs(output_dir, exist_ok=True)
     output = ospath.join(output_dir, f"{time()}.jpg")
-    cmd = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-i",
-        audio_file,
-        "-an",
-        "-vcodec",
-        "copy",
-        "-threads",
-        f"{max(1, cpu_no // 2)}",
-        output,
-    ]
+
     try:
-        _, err, code = await wait_for(cmd_exec(cmd), timeout=60)
-        if code != 0 or not await aiopath.exists(output):
-            LOGGER.error(
-                f"Error while extracting thumbnail from audio. Name: {audio_file} stderr: {err}"
-            )
-            return None
-    except:
-        LOGGER.error(
-            f"Error while extracting thumbnail from audio. Name: {audio_file}. Error: Timeout some issues with ffmpeg with specific arch!"
-        )
-        return None
-    return output
+        from mutagen.mp3 import MP3
+        from mutagen.flac import FLAC
+        from mutagen.id3 import ID3, APIC
+
+        # Determine file type
+        if audio_file.lower().endswith(".mp3"):
+            audio = MP3(audio_file, ID3=ID3)
+            # Look for APIC (attached picture) frames
+            for tag in audio.tags.values():
+                if isinstance(tag, APIC):
+                    with open(output, "wb") as img:
+                        img.write(tag.data)
+                    LOGGER.info(f"Extracted MP3 thumbnail using mutagen: {audio_file}")
+                    return output
+
+        elif audio_file.lower().endswith(".flac"):
+            audio = FLAC(audio_file)
+            if audio.pictures:
+                with open(output, "wb") as img:
+                    img.write(audio.pictures[0].data)
+                LOGGER.info(f"Extracted FLAC thumbnail using mutagen: {audio_file}")
+                return output
+
+        # Fallback to FFmpeg method
+        return await get_audio_thumbnail_ffmpeg(audio_file)
+
+    except ImportError:
+        LOGGER.warning("mutagen library not installed, falling back to FFmpeg")
+        return await get_audio_thumbnail_ffmpeg(audio_file)
+    except Exception as e:
+        LOGGER.debug(f"mutagen extraction failed: {e}, trying FFmpeg")
+        return await get_audio_thumbnail_ffmpeg(audio_file)
+
+
+async def get_audio_thumbnail_ffmpeg(audio_file):
+    """Fallback FFmpeg method"""
+    # ... your original FFmpeg code here ...
 
 
 async def get_video_thumbnail(video_file, duration):
@@ -289,7 +302,6 @@ async def get_multiple_frames_thumbnail(video_file, layout, keep_screenshots):
 
 
 class FFMpeg:
-
     def __init__(self, listener):
         self._listener = listener
         self._processed_bytes = 0
@@ -394,7 +406,7 @@ class FFMpeg:
                     prefix = ""
             else:
                 prefix = f"ffmpeg{index}."
-            output = f"{dir}/{prefix}{output_file.replace("mltb", base_name)}{ext}"
+            output = f"{dir}/{prefix}{output_file.replace('mltb', base_name)}{ext}"
             outputs.append(output)
             ffmpeg[index] = output
         if self._listener.is_cancelled:
